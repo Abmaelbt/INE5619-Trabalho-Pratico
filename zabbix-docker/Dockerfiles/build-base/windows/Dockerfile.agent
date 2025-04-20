@@ -1,0 +1,287 @@
+# syntax=docker/dockerfile:1
+# escape=`
+ARG OS_BASE_IMAGE=mcr.microsoft.com/windows/servercore:ltsc2022
+FROM ${OS_BASE_IMAGE}
+
+ARG GIT_VERSION=2.47.1
+ARG NASM_VERSION=2.16.03
+ARG VS_BUILDTOOLS_VERSION=17
+
+ARG PCRE2_VERSION=10.44
+ARG OPENSSL_VERSION=3.4.1
+ARG LIBMODBUS_VERSION=3.1.11
+ARG ZLIB_VERSION=1.3.1
+ARG CURL_VERSION=8.11.1
+
+ARG BUILD_ARCH=x64
+
+ARG MAJOR_VERSION=7.2
+ARG ZBX_VERSION=${MAJOR_VERSION}.5
+
+ARG GIT_URL=https://github.com/git-for-windows/git/releases/download/v$GIT_VERSION.windows.1/MinGit-$GIT_VERSION-64-bit.zip
+ARG PERL_URL=https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54001_64bit_UCRT/strawberry-perl-5.40.0.1-64bit-portable.zip
+
+ARG VS_BUILDTOOLS_URL=https://aka.ms/vs/$VS_BUILDTOOLS_VERSION/release/vs_buildtools.exe
+ARG NASM_URL=https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/win64/nasm-$NASM_VERSION-installer-x64.exe
+
+ARG PCRE2_URL=https://github.com/PhilipHazel/pcre2/releases/download/pcre2-$PCRE2_VERSION/pcre2-$PCRE2_VERSION.zip
+ARG OPENSSL_URL=https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz
+ARG LIBMODBUS_URL=https://github.com/stephane/libmodbus/archive/refs/tags/v$LIBMODBUS_VERSION.tar.gz
+ARG ZLIB_URL=https://zlib.net/zlib-$ZLIB_VERSION.tar.gz
+ARG CURL_URL=https://curl.se/download/curl-$CURL_VERSION.tar.gz
+
+ENV ZBX_VERSION=$ZBX_VERSION `
+    BUILD_ARCH=$BUILD_ARCH `
+    GIT_URL=$GIT_URL PERL_URL=$PERL_URL NASM_URL=$NASM_URL `
+    VS_BUILDTOOLS_URL=$VS_BUILDTOOLS_URL VS_BUILDTOOLS_VERSION=$VS_BUILDTOOLS_VERSION `
+    PCRE2_VERSION=$PCRE2_VERSION OPENSSL_VERSION=$OPENSSL_VERSION LIBMODBUS_VERSION=$LIBMODBUS_VERSION `
+    PCRE2_URL=$PCRE2_URL OPENSSL_URL=$OPENSSL_URL LIBMODBUS_URL=$LIBMODBUS_URL `
+    ZLIB_URL=$ZLIB_URL CURL_URL=$CURL_URL
+
+LABEL org.opencontainers.image.title="Zabbix agent build base for Windows" `
+      org.opencontainers.image.authors="Alexey Pustovalov <alexey.pustovalov@zabbix.com>" `
+      org.opencontainers.image.vendor="Zabbix SIA" `
+      org.opencontainers.image.url="https://zabbix.com/" `
+      org.opencontainers.image.description="Zabbix build base image contains all required packages to build Zabbix agent images" `
+      org.opencontainers.image.licenses="AGPL v3.0" `
+      org.opencontainers.image.documentation="https://www.zabbix.com/documentation/${MAJOR_VERSION}/manual/installation/containers" `
+      org.opencontainers.image.version="${ZBX_VERSION}"
+
+ADD --checksum=sha256:21c6f0523abfd37a2f5cc85879d0ff32723ab496347f0d20793df888ecec3957 $PCRE2_URL C:\pcre2.zip
+ADD --checksum=sha256:002a2d6b30b58bf4bea46c43bdd96365aaf8daa6c428782aa4feee06da197df3 $OPENSSL_URL C:\openssl.tar.gz
+ADD --checksum=sha256:15b4b2e0f68122c2da9b195de5c330489a9c97d40b4a95d2822378dc14d780e7 $LIBMODBUS_URL C:\libmodbus.tar.gz
+ADD --checksum=sha256:9A93B2B7DFDAC77CEBA5A558A580E74667DD6FEDE4585B91EEFB60F03B72DF23 $ZLIB_URL C:\zlib.tar.gz
+ADD --checksum=sha256:a889ac9dbba3644271bd9d1302b5c22a088893719b72be3487bc3d401e5c4e80 $CURL_URL C:\curl.tar.gz
+
+COPY modbus.vs16.* C:\build_src\libmodbus_project\
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+RUN Set-Location -Path $env:SystemDrive\.; `
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; `
+    `
+    $env:PATH = [string]::Format('{0}\perl\perl\bin;{1}\NASM;{0}\git\cmd;{0}\git\mingw64\bin;{0}\git\usr\bin;', $env:SystemDrive, ${env:ProgramFiles}) + $env:PATH; `
+    [Environment]::SetEnvironmentVariable('PATH', $env:PATH, [EnvironmentVariableTarget]::Machine); `
+    `
+    $env:BUILD_OUTPUT = [string]::Format('{0}\build_output', $env:SystemDrive); `
+    [Environment]::SetEnvironmentVariable('BUILD_OUTPUT', $env:BUILD_OUTPUT, [EnvironmentVariableTarget]::Machine); `
+    $env:BUILD_SRC = [string]::Format('{0}\build_src', $env:SystemDrive); `
+    [Environment]::SetEnvironmentVariable('BUILD_SRC', $env:BUILD_SRC, [EnvironmentVariableTarget]::Machine); `
+    `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT -Force | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_SRC -Force | Out-Null; `
+    `
+    Write-Host ('Downloading {0} ...' -f $env:GIT_URL); `
+    Invoke-WebRequest -OutFile $env:TEMP\git.zip -Uri $env:GIT_URL; `
+    `
+    $sha256 = '50b04b55425b5c465d076cdb184f63a0cd0f86f6ec8bb4d5860114a713d2c29a'; `
+    $d_sha256 = (Get-FileHash $env:TEMP\git.zip -Algorithm sha256).Hash; `
+    Write-Host ('Verifying SHA256 ({0}) ...' -f $sha256); `
+    if ($d_sha256 -ne $sha256) { `
+        Write-Host ('Checksum GIT for Windows ({0}) failed!' -f $d_sha256); `
+        exit 1; `
+    }; `
+    `
+    Write-Host ('Downloading {0} ...' -f $env:NASM_URL); `
+    Invoke-WebRequest -OutFile $env:TEMP\nasm_installer.exe -Uri $env:NASM_URL; `
+    `
+    $sha256 = '657E1252676CFB26A008835C20A760F731C8E0414469A4ED0F83F0FB059CDD35'; `
+    $d_sha256 = (Get-FileHash $env:TEMP\nasm_installer.exe -Algorithm sha256).Hash; `
+    Write-Host ('Verifying SHA256 ({0}) ...' -f $sha256); `
+    if ((Get-FileHash $env:TEMP\nasm_installer.exe -Algorithm sha256).Hash -ne $sha256) { `
+        Write-Host ('Checksum NASM ({0}) failed!' -f $d_sha256); `
+        exit 1; `
+    }; `
+    `
+    Write-Host ('Downloading {0} ...' -f $env:PERL_URL); `
+    Invoke-WebRequest -OutFile $env:TEMP\perl.zip -Uri $env:PERL_URL; `
+    `
+    $sha256 = '754f3e2a8e473dc68d1540c7802fb166a025f35ef18960c4564a31f8b5933907'; `
+    $d_sha256 = (Get-FileHash $env:TEMP\perl.zip -Algorithm sha256).Hash; `
+    Write-Host ('Verifying SHA256 ({0}) ...' -f $sha256); `
+    if ($d_sha256 -ne $sha256) { `
+        Write-Host ('Checksum Strawberry Perl ({0}) failed!' -f $d_sha256); `
+        exit 1; `
+    }; `
+    `
+    Write-Host ('Downloading {0} ...' -f $env:VS_BUILDTOOLS_URL); `
+    Invoke-WebRequest -OutFile $env:TEMP\vs_buildtools.exe $env:VS_BUILDTOOLS_URL; `
+    `
+    Write-Host 'Installing GIT...'; `
+    Expand-Archive `
+        -Path $env:TEMP\git.zip `
+        -DestinationPath $env:SystemDrive\git\.; `
+    `
+    Write-Host 'Verifying install ("git version") ...'; `
+    git version; `
+    Write-Host 'Installing NASM...'; `
+    Start-Process `
+        -FilePath $env:TEMP\nasm_installer.exe `
+        -ArgumentList '/S' -Wait; `
+    `
+    Write-Host 'Verifying install ("nasm -v") ...'; `
+    nasm -v; `
+    `
+    Write-Host 'Installing Perl...'; `
+    Expand-Archive -Path $env:TEMP\perl.zip -DestinationPath $env:SystemDrive\perl\; `
+    Remove-Item -Force -Recurse $env:SystemDrive\perl\c\; `
+    `
+    Write-Host 'Verifying install ("perl -V") ...'; `
+    perl -V; `
+    `
+    Write-Host ('{0} - Visual Studio components installing...' -f $(Get-Date -format 'u')); `
+    cmd /C start /w $env:TEMP\vs_buildtools.exe `
+        --quiet `
+        --wait `
+        --norestart `
+        --nocache `
+        --installPath """${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools""" `
+        --channelUri https://aka.ms/vs/$env:VS_BUILDTOOLS_VERSION/release/channel `
+        --installChannelUri https://aka.ms/vs/$env:VS_BUILDTOOLS_VERSION/release/channel `
+        --channelId VisualStudio.$env:VS_BUILDTOOLS_VERSION.Release `
+        # https://docs.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=vs-2022
+        --add Microsoft.VisualStudio.Component.Windows11SDK.22621 `
+        --add Microsoft.VisualStudio.Component.VC.CMake.Project; `
+    if ($err = dir $Env:TEMP -Filter dd_setup_*_errors.log | where Length -gt 0 | Get-Content) { `
+        throw $err; `
+    }; `
+    Wait-Process -name msiexec; `
+    Write-Host ('{0} - Visual Studio components installed' -f $(Get-Date -format 'u')); `
+    `
+    $env:VS_PATH = &(Join-Path ${env:ProgramFiles(x86)} """\Microsoft Visual Studio\Installer\vswhere.exe""") -latest -products Microsoft.VisualStudio.Product.BuildTools -property installationPath; `
+    [Environment]::SetEnvironmentVariable('VS_PATH', $env:VS_PATH, [EnvironmentVariableTarget]::Machine); `
+    `
+    Write-Host 'Visual Studio components installation cleanup'; `
+    Get-ChildItem -Path """${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer""" -Directory -Recurse | Remove-Item -Force -Recurse; `
+    `
+    Write-Host 'Build environment is ready...'; `
+    `
+    Set-Location -Path $env:BUILD_SRC; `
+    `
+    Write-Host 'Extracting PCRE2 archive ...'; `
+    Expand-Archive -Path $env:SystemDrive\pcre2.zip -DestinationPath $env:BUILD_SRC; `
+    Rename-Item -Path $env:BUILD_SRC\pcre2-$env:PCRE2_VERSION -NewName $env:BUILD_SRC\pcre2; `
+    New-Item -ItemType directory -Path "$env:BUILD_SRC\pcre2\build" | Out-Null; `
+    `
+    Write-Host 'Extracting OpenSSL archive ...'; `
+    tar -zxf $env:SystemDrive\openssl.tar.gz; `
+    Rename-Item -Path $env:BUILD_SRC\openssl-$env:OPENSSL_VERSION -NewName $env:BUILD_SRC\openssl; `
+    `
+    Write-Host 'Extracting Libmodbus archive ...'; `
+    tar -zxf $env:SystemDrive\libmodbus.tar.gz; `
+    Move-Item -Path $env:BUILD_SRC\libmodbus-$env:LIBMODBUS_VERSION\ -Destination $env:BUILD_SRC\libmodbus; `
+    Move-Item -Path $env:BUILD_SRC\libmodbus_project\* -Destination $env:BUILD_SRC\libmodbus\src\win32; `
+    `
+    Write-Host 'Extracting Zlib archive ...'; `
+    tar -zxf $env:SystemDrive\zlib.tar.gz; `
+    Move-Item -Path $env:BUILD_SRC\zlib-$env:ZLIB_VERSION\ -Destination $env:BUILD_SRC\zlib; `
+    `
+    Write-Host 'Extracting CURL archive ...'; `
+    tar -zxf $env:SystemDrive\curl.tar.gz; `
+    Move-Item -Path $env:BUILD_SRC\curl-$env:CURL_VERSION\ -Destination $env:BUILD_SRC\curl; `
+    `
+    Set-Location -Path $env:SystemDrive\.; `
+    `
+    Import-Module (Get-ChildItem $env:VS_PATH -Recurse -File -Filter Microsoft.VisualStudio.DevShell.dll).FullName; `
+    Enter-VsDevShell -VsInstallPath $env:VS_PATH -SkipAutomaticLocation -DevCmdArguments """-arch=$env:BUILD_ARCH"""; `
+    `
+    Write-Host 'Building Zlib library...'; `
+    Set-Location -Path $env:BUILD_SRC\zlib; `
+    (Get-Content .\win32\Makefile.msc).replace('-MD', '-MT') | Set-Content .\win32\Makefile.msc; `
+    set CL=/MP; `
+    nmake /S -f .\win32\Makefile.msc; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\zlib | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\zlib\include | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\zlib\lib | Out-Null; `
+    Copy-Item $env:BUILD_SRC\zlib\*.h -Destination $env:BUILD_OUTPUT\zlib\include; `
+    Copy-Item $env:BUILD_SRC\zlib\zlib.lib -Destination $env:BUILD_OUTPUT\zlib\lib; `
+    Copy-Item $env:BUILD_SRC\zlib\zlib.pdb -Destination $env:BUILD_OUTPUT\zlib\lib; `
+    nmake /S -f .\win32\Makefile.msc clean | Out-Null; `
+    Write-Host 'Zlib is ready...'; `
+    `
+    Write-Host 'Building OpenSSL library...'; `
+    Set-Location -Path $env:BUILD_SRC\openssl; `
+    perl $env:BUILD_SRC\openssl\Configure `
+        VC-WIN64A `
+        no-shared `
+        no-ui-console `
+        no-tests `
+        no-unit-test `
+        no-capieng `
+        --api=1.1.0 `
+        --prefix=$env:BUILD_OUTPUT\openssl `
+        --openssldir=$env:BUILD_OUTPUT\openssl_ssl; `
+    set CL=/MP; `
+    nmake /S build_sw; `
+    nmake /S install_dev; `
+    nmake /S clean | Out-Null; `
+    Write-Host 'OpenSSL is ready...'; `
+    `
+    Write-Host 'Building PCRE2 library ...'; `
+    Set-Location -Path $env:BUILD_SRC\pcre2\build; `
+    cmake --log-level=ERROR `
+        -G 'Visual Studio 17 2022' `
+        -A $env:BUILD_ARCH `
+        -DBUILD_SHARED_LIBS=OFF `
+        -DPCRE2_BUILD_TESTS=OFF `
+        -DCMAKE_C_FLAGS_RELEASE:string="""/MT""" ..; `
+    msbuild PCRE2.sln `
+        -maxcpucount:"""$env:NUMBER_OF_PROCESSORS""" `
+        /verbosity:quiet `
+        /property:Configuration=Release `
+        /property:Platform=$env:BUILD_ARCH `
+        /target:pcre2-8-static; `
+    `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\pcre2 | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\pcre2\include | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\pcre2\lib | Out-Null; `
+    Copy-Item $env:BUILD_SRC\pcre2\build\*.h -Destination $env:BUILD_OUTPUT\pcre2\include; `
+    Copy-Item $env:BUILD_SRC\pcre2\build\Release\* -Destination $env:BUILD_OUTPUT\pcre2\lib; `
+    Remove-Item -Path $env:BUILD_SRC\pcre2\build\* -Force -Recurse; `
+    Write-Host 'PCRE2 is ready...'; `
+    `
+    Write-Host 'Building Libmodbus library...'; `
+    `
+    Set-Location -Path $env:BUILD_SRC\libmodbus\src\win32; `
+    cscript .\configure.js; `
+    msbuild modbus.vs16.sln `
+        -maxcpucount:"""$env:NUMBER_OF_PROCESSORS""" `
+        /verbosity:quiet `
+        /property:Configuration=Release `
+        /property:Platform=$env:BUILD_ARCH; `
+    `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\libmodbus | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\libmodbus\include | Out-Null; `
+    New-Item -ItemType directory -Path $env:BUILD_OUTPUT\libmodbus\lib | Out-Null; `
+    Copy-Item $env:BUILD_SRC\libmodbus\src\*.h -Destination $env:BUILD_OUTPUT\libmodbus\include; `
+    Copy-Item $env:BUILD_SRC\libmodbus\src\win32\$env:BUILD_ARCH\Release\*.lib -Destination $env:BUILD_OUTPUT\libmodbus\lib; `
+    Copy-Item $env:BUILD_SRC\libmodbus\src\win32\$env:BUILD_ARCH\Release\*.pdb -Destination $env:BUILD_OUTPUT\libmodbus\lib; `
+    Remove-Item -Path $env:BUILD_SRC\libmodbus\src\win32\$env:BUILD_ARCH -Force -Recurse; `
+    Write-Host 'Libmodbus is ready...'; `
+    `
+    Write-Host 'Building Curl library...'; `
+    Set-Location -Path $env:BUILD_SRC\curl\winbuild; `
+    (Get-Content MakefileBuild.vc).replace(' wldap32.lib', '') | Set-Content MakefileBuild.vc; `
+    set CL=/MP; `
+    nmake /S -f Makefile.vc `
+        mode=static `
+        VC=$env:VS_BUILDTOOLS_VERSION `
+        DEBUG=no `
+        CC="""cl.exe /DCURL_DISABLE_LDAP /DCURL_DISABLE_LDAPS""" `
+        MACHINE=$env:BUILD_ARCH `
+        USE_IPV6=yes `
+        ENABLE_UNICODE=yes `
+        USE_IDN=no `
+        GEN_PDB=no `
+        WITH_SSL=static `
+        SSL_PATH=$env:BUILD_OUTPUT\openssl `
+        WITH_ZLIB=static `
+        ZLIB_PATH=$env:BUILD_OUTPUT\zlib `
+	RTLIBCFG=static; `
+    `
+    Move-Item -Path $env:BUILD_SRC\curl\builds\libcurl-vc$env:VS_BUILDTOOLS_VERSION-$env:BUILD_ARCH-release-static-ssl-static-zlib-static-sspi\ -Destination $env:BUILD_OUTPUT\curl; `
+    Remove-Item -Path $env:BUILD_SRC\curl\builds\* -Force -Recurse; `
+    Write-Host 'Curl is ready...'; `
+    `
+    Write-Host 'Removing downloaded...'; `
+    Remove-Item -Force -Recurse $env:TEMP\*;
